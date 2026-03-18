@@ -46,6 +46,11 @@ export type AudioResponse = {
   summary?: string;
 };
 
+export type StreamChunk = {
+  delta: string;
+  [key: string]: any;
+};
+
 export async function transcribeAudio(file: File): Promise<AudioResponse> {
   const formData = new FormData();
   formData.append("file", file);
