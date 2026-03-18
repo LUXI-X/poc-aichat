@@ -40,10 +40,28 @@ export type DriveSession = {
   count: number;
 };
 
-export type StreamChunk = {
-  delta?: string;
-  error?: string;
+export type AudioResponse = {
+  transcript: string;
+  language: string;
+  summary?: string;
 };
+
+export async function transcribeAudio(file: File): Promise<AudioResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch(`${API_BASE_URL}/transcribe-audio`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const error: ErrorResponse = await response.json();
+    throw new Error(error.error || "Failed to transcribe audio");
+  }
+
+  return response.json();
+}
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 

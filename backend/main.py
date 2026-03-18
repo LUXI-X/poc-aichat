@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
@@ -7,6 +7,9 @@ from google import genai
 import json
 import re
 from typing import List, Optional
+import io
+import tempfile
+from pathlib import Path
 
 load_dotenv()
 
@@ -232,3 +235,83 @@ async def generate_action_only(data: InputText):
             status_code=500,
             detail=f"Error generating action: {str(e)}"
         )
+
+@app.post("/transcribe-audio")
+async def transcribe_audio(file: UploadFile = File(...)):
+    """
+    Transcribe audio file to English text, detect language, and if Hindi, provide English summary.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    
+    # Read file
+    audio_data = await file.read()
+    
+    # Save to temp file for upload
+    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as temp_file:
+        temp_file.write(audio_data)
+        temp_file_path = temp_file.name
+    
+    try:
+        # Upload file to genai
+        uploaded_file = client.files.upload(file=temp_file_path)
+        
+        # Transcribe and detect language
+        prompt = """
+        Transcribe this audio to English text.
+        Also detect the primary language of the audio (e.g., 'en' for English, 'hi' for Hindi, etc.).
+        Return the response in JSON format:
+        {
+            "transcript": "English transcription here",
+            "language": "detected_language_code"
+        }
+        """
+        
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[uploaded_file, prompt]
+        )
+        
+        if not response or not response.text:
+            raise HTTPException(status_code=500, detail="Empty response from AI model")
+        
+        # Parse JSON response
+        output = clean_json_output(response.text)
+        result = json.loads(output)
+        
+        english_transcript = result.get("transcript", "")
+        detected_lang = result.get("language", "en")
+        
+        response_data = {
+            "transcript": english_transcript,
+            "language": detected_lang
+        }
+        
+        # If Hindi, generate English summary
+        if detected_lang == "hi":
+            summary_prompt = f"Provide a concise English summary of the following Hindi text: {english_transcript}"
+            gemini_response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=summary_prompt
+            )
+            summary = gemini_response.text.strip()
+            response_data["summary"] = summary
+        
+        return response_data
+    
+    except json.JSONDecodeError as e:
+        print(f"JSON parse error in transcribe_audio: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to parse AI response as JSON"
+        )
+    except Exception as e:
+        print(f"Error in transcribe_audio: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing audio: {str(e)}"
+        )
+    finally:
+        # Clean up temp file
+        if os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)

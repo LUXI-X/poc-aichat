@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { Menu, X, Plus, LogOut, MessageCircle, Trash2 } from "lucide-react";
+import { transcribeAudio, AudioResponse } from "../lib/api";
 
 interface Message {
   id: string;
@@ -55,6 +56,8 @@ export default function Page() {
   const [guestName] = useState("Guest User");
   const [selectedMode, setSelectedMode] = useState<"chat" | "task" | "todo" | "summary" | "project">("chat");
   const [showMentions, setShowMentions] = useState(false);
+  const [audioFile, setAudioFile] = useState<File | null>(null);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -115,13 +118,19 @@ export default function Page() {
   }
 
   async function sendMessage() {
-    if (!input.trim() || !activeChat) return;
+    if ((!input.trim() && !audioFile) || !activeChat) return;
 
-    const userText = input.trim();
+    let userContent = input.trim();
+    if (audioFile) {
+      userContent = `Audio file: ${audioFile.name}`;
+    } else {
+      userContent = `${selectedMode !== "chat" ? `@${selectedMode} ` : ""}${userContent}`;
+    }
+
     const newMsg: Message = {
       id: generateId(),
       role: "user",
-      content: `${selectedMode !== "chat" ? `@${selectedMode} ` : ""}${userText}`,
+      content: userContent,
       timestamp: new Date(),
     };
 
@@ -131,7 +140,7 @@ export default function Page() {
           return {
             ...c,
             messages: [...c.messages, newMsg],
-            title: c.messages.length === 0 ? userText.slice(0, 40) : c.title,
+            title: c.messages.length === 0 ? (audioFile ? `Audio: ${audioFile.name}` : userContent.slice(0, 40)) : c.title,
           };
         }
         return c;
@@ -139,35 +148,48 @@ export default function Page() {
     );
 
     setInput("");
+    setAudioFile(null);
     if (inputRef.current) {
       inputRef.current.style.height = "auto";
     }
 
-    // Call backend API based on mode
+    // Call backend API
     try {
-      let endpoint = "http://localhost:8000/generate";
-      if (selectedMode === "task" || selectedMode === "todo") {
-        endpoint = "http://localhost:8000/generate-todo";
-      } else if (selectedMode === "summary") {
-        endpoint = "http://localhost:8000/generate-summary";
-      } else if (selectedMode === "project") {
-        endpoint = "http://localhost:8000/generate-action";
+      let data: any;
+      if (audioFile) {
+        setIsTranscribing(true);
+        data = await transcribeAudio(audioFile);
+        setIsTranscribing(false);
+      } else {
+        let endpoint = "http://localhost:8000/generate";
+        if (selectedMode === "task" || selectedMode === "todo") {
+          endpoint = "http://localhost:8000/generate-todo";
+        } else if (selectedMode === "summary") {
+          endpoint = "http://localhost:8000/generate-summary";
+        } else if (selectedMode === "project") {
+          endpoint = "http://localhost:8000/generate-action";
+        }
+
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: input.trim() }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`API error: ${response.status}`);
+        }
+
+        data = await response.json();
       }
-
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: userText }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
-      }
-
-      const data = await response.json();
       
       let aiContent = "";
-      if (selectedMode === "task" || selectedMode === "todo") {
+      if (audioFile) {
+        aiContent = `🎵 **Audio Transcript:**\n${data.transcript}\n\n🌐 **Detected Language:** ${data.language}`;
+        if (data.summary) {
+          aiContent += `\n\n📝 **English Summary:**\n${data.summary}`;
+        }
+      } else if (selectedMode === "task" || selectedMode === "todo") {
         // Format tasks as readable list
         if (data.tasks && Array.isArray(data.tasks)) {
           aiContent = "📋 **Tasks Generated:**\n" + 
@@ -197,6 +219,7 @@ export default function Page() {
       );
     } catch (e) {
       console.error("Backend error:", e);
+      setIsTranscribing(false);
       const errorMsg: Message = {
         id: generateId(),
         role: "guest",
@@ -473,6 +496,19 @@ export default function Page() {
         {/* Input Area */}
         {currentChat && (
           <div className="shrink-0 border-t border-purple-500/10 bg-slate-950/40 backdrop-blur-sm px-4 sm:px-6 py-4 relative">
+            {/* Transcription Loading Indicator */}
+            {isTranscribing && (
+              <div className="mb-4 p-3 bg-purple-600/20 border border-purple-500/30 rounded-lg">
+                <div className="flex items-center gap-3">
+                  <div className="animate-spin rounded-full h-5 w-5 border-2 border-purple-400 border-t-transparent"></div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-purple-200">🎵 Transcribing Audio...</p>
+                    <p className="text-xs text-purple-300/60">Please wait while we process your audio file</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Mention Suggestions */}
             {showMentions && (
               <div className="absolute bottom-full left-4 right-4 mb-2 bg-slate-800/95 border border-purple-500/30 rounded-lg p-2 z-50">
@@ -502,26 +538,41 @@ export default function Page() {
             )}
             
             <div className="flex gap-3 items-end">
-              <textarea
-                ref={inputRef}
-                value={input}
-                onChange={handleInputChange}
-                onKeyDown={handleKeyDown}
-                placeholder={
-                  selectedMode === "task" || selectedMode === "todo" ? "Describe what tasks to generate..." :
-                  selectedMode === "summary" ? "What would you like summarized?" :
-                  selectedMode === "project" ? "Ask for the next action..." :
-                  "Type your message..."
-                }
-                rows={1}
-                className="flex-1 bg-slate-800/50 border border-purple-500/20 rounded-lg px-4 py-2.5 text-white placeholder-purple-300/40 focus:outline-none focus:border-purple-500/60 focus:ring-1 focus:ring-purple-500/30 resize-none max-h-24 text-sm sm:text-base"
-              />
+              <div className="flex-1">
+                <div className="mb-2">
+                  <input
+                    type="file"
+                    accept="audio/*"
+                    onChange={(e) => setAudioFile(e.target.files?.[0] || null)}
+                    disabled={isTranscribing}
+                    className="text-sm text-purple-200 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-purple-600 file:text-white file:text-xs hover:file:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  />
+                  {audioFile && <p className="text-xs text-purple-300/60 mt-1">Selected: {audioFile.name}</p>}
+                </div>
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  onChange={handleInputChange}
+                  onKeyDown={handleKeyDown}
+                  disabled={isTranscribing}
+                  placeholder={
+                    isTranscribing ? "Processing audio..." :
+                    audioFile ? "Optional message with audio..." :
+                    selectedMode === "task" || selectedMode === "todo" ? "Describe what tasks to generate..." :
+                    selectedMode === "summary" ? "What would you like summarized?" :
+                    selectedMode === "project" ? "Ask for the next action..." :
+                    "Type your message..."
+                  }
+                  rows={1}
+                  className="w-full bg-slate-800/50 border border-purple-500/20 rounded-lg px-4 py-2.5 text-white placeholder-purple-300/40 focus:outline-none focus:border-purple-500/60 focus:ring-1 focus:ring-purple-500/30 resize-none max-h-24 text-sm sm:text-base disabled:opacity-50 disabled:cursor-not-allowed"
+                />
+              </div>
               <button
                 onClick={sendMessage}
-                disabled={!input.trim()}
+                disabled={(!input.trim() && !audioFile) || isTranscribing}
                 className="bg-purple-600 hover:bg-purple-700 disabled:bg-purple-600/40 disabled:cursor-not-allowed text-white font-medium py-2.5 px-4 sm:px-6 rounded-lg transition-colors text-sm"
               >
-                Send
+                {isTranscribing ? "Processing..." : "Send"}
               </button>
             </div>
             <p className="text-xs text-purple-300/40 mt-2">
